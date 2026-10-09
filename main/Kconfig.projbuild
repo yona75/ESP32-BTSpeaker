@@ -1,0 +1,54 @@
+menu "Creeper Configuration"
+
+    config CREEPER_SINK_NAME
+        string "Bluetooth speaker / headphone name"
+        default "Mobile speaker"
+        help
+            Name of the A2DP sink to search for. Matching is case-sensitive and
+            succeeds if the advertised name starts with this string.
+
+    config CREEPER_BUTTON_GPIO
+        int "Trigger button GPIO"
+        default 0
+        help
+            GPIO of the trigger button (active low). GPIO0 is the BOOT button
+            on ESP32-DevKitC.
+
+    config CREEPER_VOLUME
+        int "Output volume (percent)"
+        range 1 100
+        default 80
+
+    config CREEPER_LED_ENABLE
+        bool "Enable WS2812 LED strip"
+        default n
+
+    config CREEPER_LED_GPIO
+        int "WS2812 data GPIO"
+        depends on CREEPER_LED_ENABLE
+        default 18
+
+    config CREEPER_LED_COUNT
+        int "Number of LEDs"
+        depends on CREEPER_LED_ENABLE
+        default 30
+
+    config CREEPER_LED_MAX_BRIGHTNESS
+        int "Maximum brightness (0-255)"
+        depends on CREEPER_LED_ENABLE
+        range 1 255
+        default 255
+        help
+            Global brightness cap. Full white draws ~60 mA per LED, so lower
+            this if the strip is powered from USB.
+
+    config CREEPER_LED_LATENCY_MS
+        int "LED delay to match Bluetooth audio latency (ms)"
+        depends on CREEPER_LED_ENABLE
+        range 0 1000
+        default 150
+        help
+            A2DP audio reaches the ears some time after it is generated. The
+            LED effect is delayed by this amount to stay in sync.
+
+endmenu
