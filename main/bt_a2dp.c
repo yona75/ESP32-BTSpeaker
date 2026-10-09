@@ -38,11 +38,14 @@ static const char *TAG = "bt";
 #define RETRY_DELAY_S      3
 #define MAX_DIRECT_RETRIES 3
 #define INQUIRY_LEN        10 /* x 1.28 s */
+#define MAX_CANDIDATES     8
+#define NAME_TIMEOUT_S     8
 
 typedef enum {
     EVT_HEARTBEAT,
     EVT_FOUND,          /* discovery matched the target, peer address in s_peer */
     EVT_DISC_STOPPED,
+    EVT_NAME_DONE,      /* remote name request finished without a match */
     EVT_A2D,
 } app_evt_type_t;
 
@@ -55,6 +58,7 @@ typedef struct {
 typedef enum {
     ST_IDLE,
     ST_DISCOVERING,
+    ST_NAMING,          /* asking candidates for their full name */
     ST_UNCONNECTED,
     ST_CONNECTING,
     ST_CONNECTED,
@@ -76,6 +80,12 @@ static bool s_found;            /* set by GAP callback when target is seen */
 static int s_ticks;             /* heartbeats spent in the current state */
 static int s_failures;          /* consecutive failed direct connects */
 static volatile bool s_streaming;
+
+/* Devices whose scan reply had no name or a shortened one that could be the
+ * target. Their full name is requested once the scan ends. */
+static esp_bd_addr_t s_cand[MAX_CANDIDATES];
+static int s_cand_count;
+static int s_cand_next;
 
 static char *bda2str(const uint8_t *bda, char *str)
 {
@@ -149,15 +159,45 @@ static bool name_matches(const uint8_t *name, uint8_t len)
     return len >= want && memcmp(name, CONFIG_CREEPER_SINK_NAME, want) == 0;
 }
 
+/* A shortened name such as "Mobile sp" that the target name starts with. */
+static bool name_is_prefix(const uint8_t *name, uint8_t len)
+{
+    return len > 0 && len < strlen(CONFIG_CREEPER_SINK_NAME) &&
+           memcmp(name, CONFIG_CREEPER_SINK_NAME, len) == 0;
+}
+
+static void add_candidate(const uint8_t *bda)
+{
+    for (int i = 0; i < s_cand_count; i++) {
+        if (memcmp(s_cand[i], bda, ESP_BD_ADDR_LEN) == 0) {
+            return;
+        }
+    }
+    if (s_cand_count < MAX_CANDIDATES) {
+        memcpy(s_cand[s_cand_count++], bda, ESP_BD_ADDR_LEN);
+    }
+}
+
+static void target_found(const uint8_t *bda)
+{
+    ESP_LOGI(TAG, "target found");
+    memcpy(s_peer, bda, ESP_BD_ADDR_LEN);
+    s_have_peer = true;
+    s_found = true;
+}
+
 static void handle_disc_result(esp_bt_gap_cb_param_t *param)
 {
     char bda_str[18];
     uint8_t *name = NULL;
     uint8_t name_len = 0;
+    uint32_t cod = 0;
 
     for (int i = 0; i < param->disc_res.num_prop; i++) {
         esp_bt_gap_dev_prop_t *p = &param->disc_res.prop[i];
-        if (p->type == ESP_BT_GAP_DEV_PROP_EIR && !name) {
+        if (p->type == ESP_BT_GAP_DEV_PROP_COD) {
+            cod = *(uint32_t *)p->val;
+        } else if (p->type == ESP_BT_GAP_DEV_PROP_EIR && !name) {
             name = esp_bt_gap_resolve_eir_data(p->val, ESP_BT_EIR_TYPE_CMPL_LOCAL_NAME, &name_len);
             if (!name) {
                 name = esp_bt_gap_resolve_eir_data(p->val, ESP_BT_EIR_TYPE_SHORT_LOCAL_NAME, &name_len);
@@ -168,18 +208,45 @@ static void handle_disc_result(esp_bt_gap_cb_param_t *param)
         }
     }
 
+    bool is_av = esp_bt_gap_is_valid_cod(cod) && esp_bt_gap_get_cod_major_dev(cod) == ESP_BT_COD_MAJOR_DEV_AV;
+
     if (!name) {
-        ESP_LOGD(TAG, "seen %s (no name)", bda2str(param->disc_res.bda, bda_str));
+        if (is_av) {
+            ESP_LOGI(TAG, "seen %s (audio device, no name)", bda2str(param->disc_res.bda, bda_str));
+            add_candidate(param->disc_res.bda);
+        }
         return;
     }
     ESP_LOGI(TAG, "seen %s \"%.*s\"", bda2str(param->disc_res.bda, bda_str), name_len, name);
 
-    if (!s_found && name_matches(name, name_len)) {
-        ESP_LOGI(TAG, "target found");
-        memcpy(s_peer, param->disc_res.bda, ESP_BD_ADDR_LEN);
-        s_have_peer = true;
-        s_found = true;
+    if (s_found) {
+        return;
+    }
+    if (name_matches(name, name_len)) {
+        target_found(param->disc_res.bda);
         esp_bt_gap_cancel_discovery();
+    } else if (name_is_prefix(name, name_len)) {
+        add_candidate(param->disc_res.bda);
+    }
+}
+
+static void handle_remote_name(esp_bt_gap_cb_param_t *param)
+{
+    char bda_str[18];
+    const uint8_t *name = param->read_rmt_name.rmt_name;
+
+    if (param->read_rmt_name.stat != ESP_BT_STATUS_SUCCESS) {
+        ESP_LOGW(TAG, "%s: name request failed (%d)", bda2str(param->read_rmt_name.bda, bda_str),
+                 param->read_rmt_name.stat);
+        post(EVT_NAME_DONE);
+        return;
+    }
+    ESP_LOGI(TAG, "full name of %s is \"%s\"", bda2str(param->read_rmt_name.bda, bda_str), name);
+    if (name_matches(name, strlen((const char *)name))) {
+        target_found(param->read_rmt_name.bda);
+        post(EVT_FOUND);
+    } else {
+        post(EVT_NAME_DONE);
     }
 }
 
@@ -193,6 +260,9 @@ static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
         if (param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STOPPED) {
             post(s_found ? EVT_FOUND : EVT_DISC_STOPPED);
         }
+        break;
+    case ESP_BT_GAP_READ_REMOTE_NAME_EVT:
+        handle_remote_name(param);
         break;
     case ESP_BT_GAP_AUTH_CMPL_EVT:
         if (param->auth_cmpl.stat == ESP_BT_STATUS_SUCCESS) {
@@ -267,8 +337,36 @@ static void start_discovery(void)
 {
     ESP_LOGI(TAG, "searching for \"%s\" (put it in pairing mode)...", CONFIG_CREEPER_SINK_NAME);
     s_found = false;
+    s_cand_count = 0;
     set_state(ST_DISCOVERING);
     esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, INQUIRY_LEN, 0);
+}
+
+/* Ask the next candidate for its full name; false when none are left. */
+static bool request_next_name(void)
+{
+    char bda_str[18];
+
+    if (s_cand_next >= s_cand_count) {
+        return false;
+    }
+    ESP_LOGI(TAG, "asking %s for its full name...", bda2str(s_cand[s_cand_next], bda_str));
+    set_state(ST_NAMING);
+    esp_bt_gap_read_remote_name(s_cand[s_cand_next++]);
+    return true;
+}
+
+/* Scan and name lookups found nothing: retry. */
+static void search_failed(void)
+{
+    if (s_have_peer) {
+        /* Alternate: one direct attempt to the known sink, then scan again. */
+        s_failures = MAX_DIRECT_RETRIES - 1;
+        set_state(ST_UNCONNECTED);
+    } else {
+        ESP_LOGI(TAG, "not found yet, scanning again...");
+        start_discovery();
+    }
 }
 
 static void connect_peer(void)
@@ -400,6 +498,11 @@ static void handle_heartbeat(app_evt_t *e)
             set_state(ST_UNCONNECTED);
         }
         break;
+    case ST_NAMING:
+        if (s_ticks >= NAME_TIMEOUT_S && !request_next_name()) {
+            search_failed();
+        }
+        break;
     case ST_CONNECTED:
         media_step(e);
         break;
@@ -427,21 +530,22 @@ static void app_task(void *arg)
             handle_heartbeat(&e);
             break;
         case EVT_FOUND:
-            if (s_state == ST_DISCOVERING) {
+            if (s_state == ST_DISCOVERING || s_state == ST_NAMING) {
                 s_failures = 0;
                 connect_peer();
             }
             break;
         case EVT_DISC_STOPPED:
             if (s_state == ST_DISCOVERING) {
-                if (s_have_peer) {
-                    /* Alternate: one direct attempt to the known sink, then scan again. */
-                    s_failures = MAX_DIRECT_RETRIES - 1;
-                    set_state(ST_UNCONNECTED);
-                } else {
-                    ESP_LOGI(TAG, "not found yet, scanning again...");
-                    start_discovery();
+                s_cand_next = 0;
+                if (!request_next_name()) {
+                    search_failed();
                 }
+            }
+            break;
+        case EVT_NAME_DONE:
+            if (s_state == ST_NAMING && !request_next_name()) {
+                search_failed();
             }
             break;
         case EVT_A2D:
