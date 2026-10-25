@@ -3,6 +3,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define CREEPER_SAMPLE_RATE 44100
 
 typedef enum {
@@ -20,3 +24,7 @@ void creeper_audio_fill(int16_t *buf, int frames);
 /* Current phase and loudness envelope (0..1) of the generated audio, for the LEDs. */
 creeper_phase_t creeper_phase(void);
 float creeper_level(void);
+
+#ifdef __cplusplus
+}
+#endif

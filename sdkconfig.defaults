@@ -1,6 +1,8 @@
-# Target: ESP32-DevKitC (original ESP32, required for Classic Bluetooth)
+# Target: M5Stack Core2 (ESP32-D0WDQ6-V3, 16 MB flash)
 CONFIG_IDF_TARGET="esp32"
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
 
 # Classic Bluetooth only, Bluedroid host, A2DP source
 CONFIG_BT_ENABLED=y
@@ -11,6 +13,5 @@ CONFIG_BT_BLUEDROID_ENABLED=y
 CONFIG_BT_CLASSIC_ENABLED=y
 CONFIG_BT_A2DP_ENABLE=y
 
-# BT stack is large; use the 1.5 MB single-app partition
-CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
-CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+# M5Unified uses the Arduino-style main task stack
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192

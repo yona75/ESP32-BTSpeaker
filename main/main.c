@@ -2,8 +2,7 @@
 #include "nvs_flash.h"
 
 #include "bt_a2dp.h"
-#include "button.h"
-#include "leds.h"
+#include "ui.h"
 
 void app_main(void)
 {
@@ -14,7 +13,6 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    leds_start();
-    button_start();
     ESP_ERROR_CHECK(bt_a2dp_start());
+    ui_run(); /* never returns */
 }
