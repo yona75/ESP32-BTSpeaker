@@ -33,6 +33,9 @@ static const char *TAG = "ui";
 #define COL_GREEN  0x3DE7 /* Creeper green */
 #define COL_DIM    TFT_DARKGREY
 
+#define BATTERY_POLL_MS 5000
+#define BATTERY_LOW     20
+
 enum ui_mode_t { MODE_STATUS, MODE_LIST, MODE_DARK };
 
 static ui_mode_t s_mode;
@@ -40,6 +43,10 @@ static uint32_t s_mode_since;
 static uint32_t s_last_touch;
 static uint32_t s_streaming_since;
 static bool s_dirty = true;
+
+static int s_batt_level = -1;     /* percent, -1 = no reading / no battery */
+static bool s_batt_charging;
+static uint32_t s_batt_polled;
 
 static bt_device_t s_rows[MAX_ROWS];
 static int s_row_count;
@@ -87,6 +94,61 @@ static void set_mode(ui_mode_t m)
     s_dirty = true;
 }
 
+/* Battery icon with percentage in the top-right corner of the header. */
+static void draw_battery(void)
+{
+    const int x = 282, y = 10, w = 28, h = 16;
+    char pct[8];
+
+    M5.Display.fillRect(228, 0, 92, 36, COL_GREEN);
+    if (s_batt_level < 0) {
+        return;
+    }
+
+    uint16_t fill = s_batt_level < BATTERY_LOW && !s_batt_charging ? TFT_RED : TFT_BLACK;
+    M5.Display.drawRect(x, y, w, h, TFT_BLACK);
+    M5.Display.fillRect(x + w, y + 4, 3, h - 8, TFT_BLACK);
+    M5.Display.fillRect(x + 2, y + 2, (w - 4) * s_batt_level / 100, h - 4, fill);
+
+    if (s_batt_charging) {
+        /* Lightning bolt, outlined so it shows on both full and empty. */
+        const int cx = x + w / 2, cy = y + h / 2;
+        M5.Display.fillTriangle(cx + 2, cy - 7, cx - 5, cy + 1, cx, cy + 1, COL_GREEN);
+        M5.Display.fillTriangle(cx - 2, cy + 7, cx + 5, cy - 1, cx, cy - 1, COL_GREEN);
+        M5.Display.drawTriangle(cx + 2, cy - 7, cx - 5, cy + 1, cx, cy + 1, TFT_BLACK);
+        M5.Display.drawTriangle(cx - 2, cy + 7, cx + 5, cy - 1, cx, cy - 1, TFT_BLACK);
+    }
+
+    snprintf(pct, sizeof(pct), "%d%%", s_batt_level);
+    M5.Display.setFont(&fonts::FreeSansBold9pt7b);
+    M5.Display.setTextColor(fill, COL_GREEN);
+    M5.Display.setTextDatum(middle_right);
+    M5.Display.drawString(pct, x - 5, 18);
+}
+
+/* Read the battery every few seconds; true if what we show has changed. */
+static bool poll_battery(bool force)
+{
+    uint32_t now = lgfx::millis();
+
+    if (!force && now - s_batt_polled < BATTERY_POLL_MS) {
+        return false;
+    }
+    s_batt_polled = now;
+
+    int level = M5.Power.getBatteryLevel();
+    bool charging = M5.Power.isCharging() == m5::Power_Class::is_charging;
+    if (level > 100) {
+        level = 100;
+    }
+    if (level == s_batt_level && charging == s_batt_charging) {
+        return false;
+    }
+    s_batt_level = level;
+    s_batt_charging = charging;
+    return true;
+}
+
 static void draw_header(const char *title)
 {
     M5.Display.fillScreen(COL_BG);
@@ -95,6 +157,7 @@ static void draw_header(const char *title)
     M5.Display.setFont(&fonts::FreeSansBold12pt7b);
     M5.Display.setTextDatum(middle_left);
     M5.Display.drawString(title, 10, 18);
+    draw_battery();
 }
 
 static void draw_status(void)
@@ -289,6 +352,13 @@ static void update(void)
         break;
     case MODE_DARK:
         break;
+    }
+
+    /* Battery: only while the screen is on, and redraw just the icon. */
+    if (s_mode != MODE_DARK && poll_battery(s_dirty) && !s_dirty) {
+        M5.Display.startWrite();
+        draw_battery();
+        M5.Display.endWrite();
     }
 
     if (s_dirty && s_mode != MODE_DARK) {

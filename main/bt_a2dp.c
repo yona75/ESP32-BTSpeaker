@@ -245,8 +245,11 @@ static void handle_disc_result(esp_bt_gap_cb_param_t *param)
 static void handle_remote_name(esp_bt_gap_cb_param_t *param)
 {
     char bda_str[18];
+    app_evt_t ev = { .type = EVT_NAME_DONE };
 
     if (param->read_rmt_name.stat == ESP_BT_STATUS_SUCCESS) {
+        memcpy(ev.dev.bda, param->read_rmt_name.bda, ESP_BD_ADDR_LEN);
+        strlcpy(ev.dev.name, (char *)param->read_rmt_name.rmt_name, sizeof(ev.dev.name));
         ESP_LOGI(TAG, "full name of %s is \"%s\"", bda2str(param->read_rmt_name.bda, bda_str),
                  param->read_rmt_name.rmt_name);
         portENTER_CRITICAL(&s_scan_lock);
@@ -257,7 +260,7 @@ static void handle_remote_name(esp_bt_gap_cb_param_t *param)
         }
         portEXIT_CRITICAL(&s_scan_lock);
     }
-    post(EVT_NAME_DONE);
+    xQueueSend(s_queue, &ev, 0);
 }
 
 static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
@@ -289,7 +292,11 @@ static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
         break;
     }
     case ESP_BT_GAP_ACL_CONN_CMPL_STAT_EVT:
-        ESP_LOGI(TAG, "link up (status %d)", param->acl_conn_cmpl_stat.stat);
+        if (param->acl_conn_cmpl_stat.stat == ESP_BT_STATUS_SUCCESS) {
+            ESP_LOGI(TAG, "link up");
+        } else {
+            ESP_LOGW(TAG, "link failed (status 0x%x)", param->acl_conn_cmpl_stat.stat);
+        }
         break;
     case ESP_BT_GAP_ACL_DISCONN_CMPL_STAT_EVT:
         ESP_LOGI(TAG, "link down (reason 0x%x)", param->acl_disconn_cmpl_stat.reason);
@@ -404,6 +411,8 @@ static void on_connected(const uint8_t *bda)
     }
     ESP_LOGI(TAG, "connected to %s", bda2str(bda, bda_str));
     peer_save();
+    /* The name may be a shortened one from the scan; fetch the full one. */
+    esp_bt_gap_read_remote_name(s_peer);
     forget_other_bonds();
     s_media = MEDIA_IDLE;
     set_state(ST_CONNECTED);
@@ -565,6 +574,13 @@ static void app_task(void *arg)
             }
             break;
         case EVT_NAME_DONE:
+            if (e.dev.name[0] && s_have_peer && memcmp(e.dev.bda, s_peer, ESP_BD_ADDR_LEN) == 0 &&
+                strcmp(e.dev.name, s_peer_name) != 0) {
+                strlcpy(s_peer_name, e.dev.name, sizeof(s_peer_name));
+                if (s_state == ST_CONNECTED) {
+                    peer_save();
+                }
+            }
             if (s_state == ST_NAMING && !request_next_name()) {
                 settle();
             }
